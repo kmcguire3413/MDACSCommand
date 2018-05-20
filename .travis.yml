@@ -1,0 +1,21 @@
+language: csharp
+mono: none
+dotnet: 2.1.200
+git:
+ depth: 3
+branches:
+ only:
+ - nightly
+before_install: true
+install: true
+before_script: true
+script:
+ - cd MDACSCommand
+ - dotnet build
+before_cache: true
+before_deploy: true
+deploy:
+        skip_cleanup: false
+after_deploy: true
+after_script: true
+
