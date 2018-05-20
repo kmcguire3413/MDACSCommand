@@ -29,28 +29,55 @@ using System.Text;
 namespace MDACS.Command
 {
     class CommandQueueGroup {
-        SemaphoreSlim signalChange;
+        SemaphoreSlim entryCountLock;
+        SemaphoreSlim critical;
         List<CommandWaitResponseEntry> entries;
 
         public CommandQueueGroup() {
-            signalChange = new SemaphoreSlim(1);
+            critical = new SemaphoreSlim(1, 1);
+            entryCountLock = new SemaphoreSlim(0, 0xffff);
             entries = new List<CommandWaitResponseEntry>();
         }
 
-        public void Add(CommandWaitResponseEntry entry) {
+
+
+        public async Task Add(CommandWaitResponseEntry entry) {
+            await critical.WaitAsync();
             entries.Add(entry);
+            entryCountLock.Release();
+            critical.Release();
         }
 
-        public int Count() {
-            return entries.Count;
+        public async Task<int> Count() {
+            await critical.WaitAsync();
+            var cnt = entries.Count;
+            critical.Release();
+            return cnt;
         }
 
-        public async Task WaitForChangeAsync() {
-            await signalChange.WaitAsync();
-        }
+        /// <remark>
+        /// The way this works is that each time an item is added it increments the
+        /// `entryCountLock` and allows one thread of execution to enter. Each thread
+        /// that enters grabs all avaliable entries which throws off the `entryCountLock`
+        /// but the only side effect of that is the next thread that goes in will just have
+        /// to spin off the extra count before it finally stops waiting for an actual entry.
+        ///
+        /// I would have prefered to have used something more efficient and I am sure that
+        /// there is a way to do it. I simply need a Sempahore that can be released multiple
+        /// times without throwing an exception or exceeding its maximum count.
+        /// </remark>
+        public async Task<CommandWaitResponseEntry[]> WaitAndGetCommands() {
+            CommandWaitResponseEntry[] ret;
 
-        public CommandWaitResponseEntry[] TakeArray() {
-            return entries.ToArray();
+            do {
+                await entryCountLock.WaitAsync();
+                await critical.WaitAsync();
+                ret = entries.ToArray();
+                entries.Clear();
+                critical.Release();
+            } while (ret.Length < 1);
+
+            return ret;
         }
     }
 
@@ -66,20 +93,12 @@ namespace MDACS.Command
             this.usedIds = new HashSet<string>();
         }
 
-        public async Task<Task> CommandResponseHandler(ServerHandler shandler, HTTPRequest request, Stream body, IProxyHTTPEncoder encoder) {
-            return Task.CompletedTask;
-        }        
-        public async Task<Task> CommandExecuteHandler(ServerHandler shandler, HTTPRequest request, Stream body, IProxyHTTPEncoder encoder) {
-            // look for identifier
-                // if not registered then return an error
-            // place the command in the appropriate queue
-            return Task.CompletedTask;
+        string GetNewCommandId() {
+            var guid = Guid.NewGuid();
+            return guid.ToString();
         }
-        public async Task<Task> CommandWaitHandler(ServerHandler shandler, HTTPRequest request, Stream body, IProxyHTTPEncoder encoder) {
-            // authenticate request
-            // register the provided string as our identifier and append a number to make
-            //      the identifier unique if needed
-            // block here until a command becomes avalible or a timeout happens
+
+        public async Task<Task> CommandResponseTakeHandler(ServerHandler shandler, HTTPRequest request, Stream body, IProxyHTTPEncoder encoder) {
             var auth = await Helpers.ReadMessageFromStreamAndAuthenticate(config.authUrl, 1024 * 16, body);
 
             if (!auth.success)
@@ -93,7 +112,122 @@ namespace MDACS.Command
                 return Task.CompletedTask;
             }
 
-            if (auth.user.privRegisterCommandService == false && auth.user.admin == false)
+            var req = JsonConvert.DeserializeObject<CommandWaitRequest>(auth.payload);
+            
+            return Task.CompletedTask;
+        }        
+        public async Task<Task> CommandResponseWriteHandler(ServerHandler shandler, HTTPRequest request, Stream body, IProxyHTTPEncoder encoder) {
+            var auth = await Helpers.ReadMessageFromStreamAndAuthenticate(config.authUrl, 1024 * 16, body);
+
+            if (!auth.success)
+            {
+                await encoder.WriteQuickHeader(403, "Must be authenticated.");
+                await encoder.BodyWriteSingleChunk(JsonConvert.SerializeObject(
+                    JObject.FromObject(new {
+                        success = false,
+                    })
+                ));
+                return Task.CompletedTask;
+            }
+
+            var req = JsonConvert.DeserializeObject<CommandWaitRequest>(auth.payload);
+            
+            return Task.CompletedTask;
+        }        
+        public async Task<Task> CommandExecuteHandler(ServerHandler shandler, HTTPRequest request, Stream body, IProxyHTTPEncoder encoder) {
+            var auth = await Helpers.ReadMessageFromStreamAndAuthenticate(config.authUrl, 1024 * 16, body);
+
+            if (!auth.success)
+            {
+                await encoder.WriteQuickHeader(403, "Must be authenticated.");
+                await encoder.BodyWriteSingleChunk(JsonConvert.SerializeObject(
+                    JObject.FromObject(new {
+                        success = false,
+                    })
+                ));
+                return Task.CompletedTask;
+            }
+
+            if (!await UserHasPrivilegeRegisterCommandService(auth.user) && !auth.user.admin)
+            {
+                await encoder.WriteQuickHeader(403, "Must be admin or have privRegisterService set to true.");
+                await encoder.BodyWriteSingleChunk(JsonConvert.SerializeObject(
+                    JObject.FromObject(new {
+                        success = false,
+                    })
+                ));
+                return Task.CompletedTask;
+            }
+
+            var req = JsonConvert.DeserializeObject<CommandExecuteRequest>(auth.payload);
+
+            if (!groups.ContainsKey(req.serviceId)) {
+                await encoder.WriteQuickHeader(404, "Service does not exist");
+                await encoder.BodyWriteSingleChunk(JsonConvert.SerializeObject(
+                    JObject.FromObject(new {
+                        success = false,
+                    })
+                ));
+                return Task.CompletedTask;
+            }
+
+            await groups[req.serviceId].Add(new CommandWaitResponseEntry() {
+                command = req.command,
+                user = auth.user,
+                id = GetNewCommandId(),
+            });
+
+            await encoder.WriteQuickHeader(200, "Command has been queued");
+            await encoder.BodyWriteSingleChunk(JsonConvert.SerializeObject(
+                JObject.FromObject(new {
+                    success = true,
+                })
+            ));
+            return Task.CompletedTask;
+        }
+        /// <summary>
+        /// Return true if the provided user has the privilege to register a command service.
+        /// </summary>
+        /// <remarks>
+        /// Uses reflection to support future implementation of a property that determines the privilege.
+        /// </remarks>
+        public async Task<bool> UserHasPrivilegeRegisterCommandService(Auth.User user) {
+            var userType = user.GetType();
+
+            var propInfo = userType.GetProperty("privRegisterCommandService");
+
+            if (propInfo == null) {
+                return true;
+            }
+
+            var valueObject = propInfo.GetValue(user);
+
+            if (valueObject == null) {
+                return true;
+            }
+
+            if (!valueObject.GetType().Name.Equals("bool")) {
+                return true;
+            }
+
+            return (bool)valueObject;
+        }
+
+        public async Task<Task> CommandWaitHandler(ServerHandler shandler, HTTPRequest request, Stream body, IProxyHTTPEncoder encoder) {
+            var auth = await Helpers.ReadMessageFromStreamAndAuthenticate(config.authUrl, 1024 * 16, body);
+
+            if (!auth.success)
+            {
+                await encoder.WriteQuickHeader(403, "Must be authenticated.");
+                await encoder.BodyWriteSingleChunk(JsonConvert.SerializeObject(
+                    JObject.FromObject(new {
+                        success = false,
+                    })
+                ));
+                return Task.CompletedTask;
+            }
+
+            if (!await UserHasPrivilegeRegisterCommandService(auth.user) && !auth.user.admin)
             {
                 await encoder.WriteQuickHeader(403, "Must be admin or have privRegisterService set to true.");
                 await encoder.BodyWriteSingleChunk(JsonConvert.SerializeObject(
@@ -106,28 +240,38 @@ namespace MDACS.Command
 
             var req = JsonConvert.DeserializeObject<CommandWaitRequest>(auth.payload);
 
-            var actualId = getCompleteWaitId(req.serviceId, req.guid);
+            var actualId = GetCompleteWaitId(req.serviceId, req.serviceGuid);
 
-            if (!groups.ContainsKey(actualId) || groups[actualId].Count() == 0) {
-                //
-                await groups[actualId].WaitForChangeAsync();
-
-                //await encoder.WriteQuickHeader(200, "OK WITH ZERO ITEMS");
-                //await encoder.BodyWriteSingleChunk(JsonConvert.SerializeObject(
-                //    new CommandWaitResponse() {
-                //        success = true,
-                //        commands = new List<CommandWaitResponseEntry>().ToArray(),
-                //    }
-                //));
+            if (!groups.ContainsKey(actualId)) {
+                await encoder.WriteQuickHeader(404, "No such queue exists");
+                await encoder.BodyWriteSingleChunk(JsonConvert.SerializeObject(
+                    new CommandWaitResponse() {
+                        success = false,
+                        commands = null,
+                    }
+                ));
 
                 return Task.CompletedTask;
             }
 
-            await encoder.WriteQuickHeader(200, "OK WITH ITEMS");
+            var cmdWaitTask = groups[actualId].WaitAndGetCommands();
+            if (Task.WaitAny(cmdWaitTask, Task.Delay(req.timeout)) == 1) {
+                await encoder.WriteQuickHeader(200, "Timeout");
+                await encoder.BodyWriteSingleChunk(JsonConvert.SerializeObject(
+                    new CommandWaitResponse() {
+                        success = false,
+                        commands = null,
+                    }
+                ));
+
+                return Task.CompletedTask;
+            }
+
+            await encoder.WriteQuickHeader(200, "Ok with items");
             await encoder.BodyWriteSingleChunk(JsonConvert.SerializeObject(
                 new CommandWaitResponse() {
                     success = true,
-                    commands = groups[actualId].TakeArray(),
+                    commands = cmdWaitTask.Result,
                 }
             ));
 
@@ -140,7 +284,7 @@ namespace MDACS.Command
         /// the same identifier and this helper function provides consistent resolution
         /// for those cases.
         /// </summary>
-        public string getCompleteWaitId(string serviceId, string guid) {
+        public string GetCompleteWaitId(string serviceId, string guid) {
             var id = serviceId;
 
             if (guidToId.ContainsKey(guid)) {
@@ -158,6 +302,12 @@ namespace MDACS.Command
         }
     }
 
+
+    class CommandExecuteRequest {
+        public string command;
+        public string serviceId;
+    }
+
     class CommandWaitRequest {
         /// <summary>
         /// The service identifier represents the service waiting using a human readable
@@ -169,12 +319,12 @@ namespace MDACS.Command
         /// An identifier that should be globally unique. It helps to create consistent
         /// suffixes for conflicting service identifiers.
         /// </summary>
-        public string guid;
+        public string serviceGuid;
         /// <summary>
-        /// The maximum time to wait in seconds for the request before returning a
+        /// The maximum time to wait in milliseconds for the request before returning a
         /// non-success code.
         /// </summary>
-        public uint timeout;
+        public int timeout;
     }
 
     /// <summary>
@@ -199,6 +349,29 @@ namespace MDACS.Command
     class CommandWaitResponse {
         public bool success;
         public CommandWaitResponseEntry[] commands;
+    }
+
+    class CommandResponseTakeResponse {
+        public Dictionary<string, string> responses;
+    }
+
+    class CommandResponseTakeRequest {
+        public string serviceId;
+        /// <summary>
+        /// The list of identifiers representing each command to receive the response for.
+        /// </summary>
+        public string[] commandIds;
+    }
+    /// <summary>
+    /// Request to provide results for executed commands.
+    /// </summary>
+    class CommandResponseWriteRequest {
+        public string serviceId;
+        public string serviceGuid;
+        /// <summary>
+        /// Provide results using command GUID as the key and the result data as the value.
+        /// </summary>
+        public Dictionary<string, string> responses;
     }
 
     public class Program
@@ -240,7 +413,8 @@ namespace MDACS.Command
 
             handlers.Add("/command-wait", handler.CommandWaitHandler);
             handlers.Add("/command-execute", handler.CommandExecuteHandler);
-            handlers.Add("/command-response", handler.CommandResponseHandler);
+            handlers.Add("/command-response-write", handler.CommandResponseWriteHandler);
+            handlers.Add("/command-response-take", handler.CommandResponseTakeHandler);
 
             var server = SimpleServer<ServerHandler>.Create(
                 handler,
