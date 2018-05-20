@@ -81,16 +81,23 @@ namespace MDACS.Command
         }
     }
 
+    struct CommandResponseStored {
+        public long createTime;
+        public string commandResponse;
+    }
+
     class ServerHandler {
         ProgramConfig config;
         Dictionary<string, CommandQueueGroup> groups;
         HashSet<string> usedIds;
         Dictionary<string, string> guidToId;
+        Dictionary<string, CommandResponseStored> responses;
 
         public ServerHandler(ProgramConfig config) {
             this.config = config;
             this.groups = new Dictionary<string, CommandQueueGroup>();
             this.usedIds = new HashSet<string>();
+            this.responses = new Dictionary<string, CommandResponseStored>();
         }
 
         string GetNewCommandId() {
@@ -112,10 +119,25 @@ namespace MDACS.Command
                 return Task.CompletedTask;
             }
 
-            var req = JsonConvert.DeserializeObject<CommandWaitRequest>(auth.payload);
+            var req = JsonConvert.DeserializeObject<CommandResponseTakeRequest>(auth.payload);
+            var reply = new CommandResponseTakeResponse() {
+                responses = new Dictionary<string, string>(),
+            };
+
+            foreach (var guid in req.commandIds) {
+                if (responses.ContainsKey(guid)) {
+                    reply.responses[guid] = responses[guid].commandResponse;
+                } else {
+                    reply.responses[guid] = null;
+                }
+            }
+
+            await encoder.WriteQuickHeader(200, "OK");
+            await encoder.BodyWriteSingleChunk(JsonConvert.SerializeObject(reply));            
             
             return Task.CompletedTask;
-        }        
+        }
+
         public async Task<Task> CommandResponseWriteHandler(ServerHandler shandler, HTTPRequest request, Stream body, IProxyHTTPEncoder encoder) {
             var auth = await Helpers.ReadMessageFromStreamAndAuthenticate(config.authUrl, 1024 * 16, body);
 
@@ -130,8 +152,51 @@ namespace MDACS.Command
                 return Task.CompletedTask;
             }
 
-            var req = JsonConvert.DeserializeObject<CommandWaitRequest>(auth.payload);
+            var req = JsonConvert.DeserializeObject<CommandResponseWriteRequest>(auth.payload);
             
+            // The initially used GUID per service is kept secret for each service. However,
+            // at the moment the exact service the GUID maps to is not stored. Storing and
+            // using that would increase the security.
+            // TODO: increase security
+            // SECURITY: utilize the GUID for commmand response writing
+            if (!usedIds.Contains(req.serviceGuid)) {
+                await encoder.WriteQuickHeader(403, "Must be authenticated.");
+                await encoder.BodyWriteSingleChunk(JsonConvert.SerializeObject(
+                    JObject.FromObject(new {
+                        success = false,
+                    })
+                ));
+                return Task.CompletedTask;                
+            }
+
+            var curFileTime = DateTime.Now.ToFileTimeUtc();
+
+            var toRemove = new List<string>();
+
+            foreach (var pair in this.responses) {
+                if (curFileTime - pair.Value.createTime > 1000 * 60 * 60 * 24 * 7) {
+                    toRemove.Add(pair.Key);
+                }
+            }
+
+            foreach (var key in toRemove) {
+                this.responses.Remove(key);
+            }
+
+            foreach (var pair in req.responses) {
+                this.responses[pair.Key] = new CommandResponseStored() {
+                    createTime = curFileTime,
+                    commandResponse = pair.Value,
+                };
+            }
+
+            await encoder.WriteQuickHeader(200, "OK");
+            await encoder.BodyWriteSingleChunk(JsonConvert.SerializeObject(
+                JObject.FromObject(new {
+                    success = true,
+                })
+            ));
+
             return Task.CompletedTask;
         }        
         public async Task<Task> CommandExecuteHandler(ServerHandler shandler, HTTPRequest request, Stream body, IProxyHTTPEncoder encoder) {
@@ -183,6 +248,7 @@ namespace MDACS.Command
                     success = true,
                 })
             ));
+
             return Task.CompletedTask;
         }
         /// <summary>
@@ -356,7 +422,6 @@ namespace MDACS.Command
     }
 
     class CommandResponseTakeRequest {
-        public string serviceId;
         /// <summary>
         /// The list of identifiers representing each command to receive the response for.
         /// </summary>
