@@ -12,8 +12,6 @@ before_script: true
 script:
  - cd MDACSCommand
  - dotnet build
-before_cache: true
-before_deploy:
  - git config --local user.name "Travis-CI"
  - git config --local user.email "none@none.none"
  - echo $GHSSHK > ~/.ssh/id_github_mdacs
