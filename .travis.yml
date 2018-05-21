@@ -14,7 +14,7 @@ script:
  - dotnet build
  - git config --local user.name "Travis-CI"
  - git config --local user.email "none@none.none"
- - printf $GHSSHK > ~/.ssh/id_github_mdacs
+ - printf "$GHSSHK" > ~/.ssh/id_github_mdacs
  - chmod 600 ~/.ssh/id_github_mdacs
  - echo "Host github.com" >> ~/.ssh/config
  - echo "  IdentityFile ~/.ssh/id_github_mdacs" >> ~/.ssh/config
