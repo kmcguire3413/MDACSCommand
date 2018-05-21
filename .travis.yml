@@ -33,7 +33,6 @@ before_deploy:
  - git add *
  - git commit -m "travis-ci automated deploy of nightly MDACSCommand"
  - git push origin master
-deploy: true
 after_deploy: true
 after_script: true
 
