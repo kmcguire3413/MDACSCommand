@@ -16,16 +16,24 @@ before_cache: true
 before_deploy:
  - git config --local user.name "Travis-CI"
  - git config --local user.email "none@none.none"
- - git tag "Command-$(date +'%Y%m%d%H%M%S')-$(git log --format=%h -1)"
 deploy:
-  skip_cleanup: true
-  provider: releases
-  api_key:
-    secure: XCjIDSsWAZ+hCkaTBNN9NZXZ66wEiE7rMen0xF3txpw2pSPsy7g4jyk709/H0qUs5V+XAJo4yqwOLXPnnzEymiYDxrq9RXl/Hl1mMuT53jOHNZI7qY9Lf9QNKgsu26jYhf0YP38Wsaao3sCcsdL4rO5DM8Z6Xkx4NHlrBSsJ1BChxJL7hMlkem1luOZNgJVRUQ/5zp/UnVmx8UojZtIsThKvEkPypTE6VUn3HEwGTMvOHSTxGKN3tVrURCigmR+TTU16ZOn5e5ix0mro6dlQJHNJrCZ+WkdmRqlCVTK9G61KjPBxnOGqI5yyxVzxzfsA+PP9mLcyWi3otBy2V4U7k9ij3S/sR6Zbw5hCL3EuMV5J22jMFi4his9iT9S+CnZqBcrll+cZ/EKcJ94n6Z0r4eYvxtvqQTPA0FM3m7aAqh68ddHAFSX/jHgcixQu72m/vHO7f20PH8UJRe6IwLIsFClaIqnXBE6yIHMO3Vn6EypYlprNMX2z6xi73mHyW9tM+O+fyH+UvqV+PZQBrQb9wVqYMWunVliLXGz4Dz8s1eTIqtcJ+bSeeVemb5GwTrbhqEUwXugSPSXZpwRhPKpVUNPcrQyJL5zFG3dXr/+5Tz0/tyL88615K5zXOVoSCqj/YDQWgr4T/1ZSQjUW47kNPyPy6hKpu2VUF/V6b+0V1Rg=
-  file_glob: true
-  file: ./bin/Debug/netcoreapp2.0/*
-  on:
-    repo: kmcguire3413/MDACSDeliverables        
+ - echo $GHSSHK > ~/.ssh/id_github_mdacs
+ - chmod 600 ~/.ssh/id_github_mdacs
+ - echo "Host github.com" >> ~/.ssh/config
+ - echo "  IdentityFile ~/.ssh/id_github_mdacs" >> ~/.ssh/config
+ - chmod 600 ~/.ssh/config
+ - mkdir ~/tmp/
+ - cp ./bin/Debug/netcoreapp2.0/* ~/tmp/
+ - cd ~
+ - git clone git@github.com:kmcguire3413/MDACSDeliverables.git
+ - cd MDACSDeliverables
+ - cd Nightly
+ - mkdir -p MDACSCommand
+ - cd MDACSCommand
+ - cp ~/tmp/* ./
+ - git add *
+ - git commit -m "travis-ci automated deploy of nightly MDACSCommand"
+ - git push origin master
 after_deploy: true
 after_script: true
 
