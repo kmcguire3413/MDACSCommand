@@ -16,7 +16,6 @@ before_cache: true
 before_deploy:
  - git config --local user.name "Travis-CI"
  - git config --local user.email "none@none.none"
-deploy:
  - echo $GHSSHK > ~/.ssh/id_github_mdacs
  - chmod 600 ~/.ssh/id_github_mdacs
  - echo "Host github.com" >> ~/.ssh/config
@@ -34,6 +33,7 @@ deploy:
  - git add *
  - git commit -m "travis-ci automated deploy of nightly MDACSCommand"
  - git push origin master
+deploy: true
 after_deploy: true
 after_script: true
 
