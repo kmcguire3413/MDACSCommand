@@ -21,10 +21,13 @@ using System.Threading;
 using System.Net.Security;
 using MDACS.Server;
 using Newtonsoft.Json.Linq;
-using MDACSAPI;
+using MDACS.API.Responses;
+using MDACS.API.Requests;
 using System.Threading.Tasks;
 using MDACS.API;
 using System.Text;
+using System.Reflection;
+using System.Diagnostics;
 
 namespace MDACS.Command
 {
@@ -105,7 +108,7 @@ namespace MDACS.Command
             return guid.ToString();
         }
 
-        public async Task<Task> CommandResponseTakeHandler(ServerHandler shandler, HTTPRequest request, Stream body, IProxyHTTPEncoder encoder) {
+        public async Task<Task> CommandResponseReadHandler(ServerHandler shandler, HTTPRequest request, Stream body, IProxyHTTPEncoder encoder) {
             var auth = await Helpers.ReadMessageFromStreamAndAuthenticate(config.authUrl, 1024 * 16, body);
 
             if (!auth.success)
@@ -119,8 +122,8 @@ namespace MDACS.Command
                 return Task.CompletedTask;
             }
 
-            var req = JsonConvert.DeserializeObject<CommandResponseTakeRequest>(auth.payload);
-            var reply = new CommandResponseTakeResponse() {
+            var req = JsonConvert.DeserializeObject<CommandResponseReadRequest>(auth.payload);
+            var reply = new CommandResponseReadResponse() {
                 responses = new Dictionary<string, string>(),
             };
 
@@ -202,6 +205,8 @@ namespace MDACS.Command
         public async Task<Task> CommandExecuteHandler(ServerHandler shandler, HTTPRequest request, Stream body, IProxyHTTPEncoder encoder) {
             var auth = await Helpers.ReadMessageFromStreamAndAuthenticate(config.authUrl, 1024 * 16, body);
 
+            Debug.WriteLine($"CommandExecuteHandler");
+
             if (!auth.success)
             {
                 await encoder.WriteQuickHeader(403, "Must be authenticated.");
@@ -213,7 +218,7 @@ namespace MDACS.Command
                 return Task.CompletedTask;
             }
 
-            if (!await UserHasPrivilegeRegisterCommandService(auth.user) && !auth.user.admin)
+            if (!await UserHasPrivilegeExecuteCommandService(auth.user) && !auth.user.admin)
             {
                 await encoder.WriteQuickHeader(403, "Must be admin or have privRegisterService set to true.");
                 await encoder.BodyWriteSingleChunk(JsonConvert.SerializeObject(
@@ -223,6 +228,8 @@ namespace MDACS.Command
                 ));
                 return Task.CompletedTask;
             }
+
+            Debug.WriteLine($"CommandExecuteHandler: user has privilege to execute");
 
             var req = JsonConvert.DeserializeObject<CommandExecuteRequest>(auth.payload);
 
@@ -279,8 +286,32 @@ namespace MDACS.Command
             return (bool)valueObject;
         }
 
+        public async Task<bool> UserHasPrivilegeExecuteCommandService(Auth.User user) {
+            var userType = user.GetType();
+
+            var propInfo = userType.GetProperty("privExecuteCommandService");
+
+            if (propInfo == null) {
+                return true;
+            }
+
+            var valueObject = propInfo.GetValue(user);
+
+            if (valueObject == null) {
+                return true;
+            }
+
+            if (!valueObject.GetType().Name.Equals("bool")) {
+                return true;
+            }
+
+            return (bool)valueObject;
+        }        
+
         public async Task<Task> CommandWaitHandler(ServerHandler shandler, HTTPRequest request, Stream body, IProxyHTTPEncoder encoder) {
             var auth = await Helpers.ReadMessageFromStreamAndAuthenticate(config.authUrl, 1024 * 16, body);
+
+            Debug.WriteLine($"CommandWaitHandler");
 
             if (!auth.success)
             {
@@ -293,6 +324,8 @@ namespace MDACS.Command
                 return Task.CompletedTask;
             }
 
+            Debug.WriteLine($"CommandWaitHandler: checking user register privilege");
+
             if (!await UserHasPrivilegeRegisterCommandService(auth.user) && !auth.user.admin)
             {
                 await encoder.WriteQuickHeader(403, "Must be admin or have privRegisterService set to true.");
@@ -303,6 +336,8 @@ namespace MDACS.Command
                 ));
                 return Task.CompletedTask;
             }
+
+            Debug.WriteLine($"CommandWaitHandler: user has privilege");
 
             var req = JsonConvert.DeserializeObject<CommandWaitRequest>(auth.payload);
 
@@ -320,8 +355,13 @@ namespace MDACS.Command
                 return Task.CompletedTask;
             }
 
+            Debug.WriteLine($"CommandWaitHandler: waiting for commands");
+
             var cmdWaitTask = groups[actualId].WaitAndGetCommands();
+
             if (Task.WaitAny(cmdWaitTask, Task.Delay(req.timeout)) == 1) {
+                Debug.WriteLine($"CommandWaitHandler: command wait timed out");
+
                 await encoder.WriteQuickHeader(200, "Timeout");
                 await encoder.BodyWriteSingleChunk(JsonConvert.SerializeObject(
                     new CommandWaitResponse() {
@@ -332,6 +372,8 @@ namespace MDACS.Command
 
                 return Task.CompletedTask;
             }
+
+            Debug.WriteLine($"CommandWaitHandler: command wait has items");
 
             await encoder.WriteQuickHeader(200, "Ok with items");
             await encoder.BodyWriteSingleChunk(JsonConvert.SerializeObject(
@@ -366,77 +408,6 @@ namespace MDACS.Command
 
             return id;
         }
-    }
-
-
-    class CommandExecuteRequest {
-        public string command;
-        public string serviceId;
-    }
-
-    class CommandWaitRequest {
-        /// <summary>
-        /// The service identifier represents the service waiting using a human readable
-        /// descriptive string. The string should have no whitespace so that it is not
-        /// ambigious with the command string that it may be used within.
-        /// </summary>
-        public string serviceId;
-        /// <summary>
-        /// An identifier that should be globally unique. It helps to create consistent
-        /// suffixes for conflicting service identifiers.
-        /// </summary>
-        public string serviceGuid;
-        /// <summary>
-        /// The maximum time to wait in milliseconds for the request before returning a
-        /// non-success code.
-        /// </summary>
-        public int timeout;
-    }
-
-    /// <summary>
-    /// Each command to be executed has to associated user that provided
-    /// the command. A client has to authenticate to provide commands and
-    /// attaching the user information to each command is cheap and useful.
-    /// </summary>
-    class CommandWaitResponseEntry {
-        public string command;
-        public Auth.User user;
-        /// <summary>
-        /// The id for each command is unique and internal to the command service. The
-        /// id is used to associate command responses with commands.
-        /// </summary>
-        public string id;
-    }
-
-    /// <summary>
-    /// Each proper response provides zero or more commands that needs to
-    /// be executed and have responses returned.
-    /// </summary>
-    class CommandWaitResponse {
-        public bool success;
-        public CommandWaitResponseEntry[] commands;
-    }
-
-    class CommandResponseTakeResponse {
-        public Dictionary<string, string> responses;
-    }
-
-    class CommandResponseTakeRequest {
-        /// <summary>
-        /// The list of identifiers representing each command to receive the response for.
-        /// </summary>
-        public string[] commandIds;
-    }
-    /// <summary>
-    /// Request to provide results for executed commands.
-    /// </summary>
-    class CommandResponseWriteRequest {
-        public string serviceId;
-        public string serviceGuid;
-        /// <summary>
-        /// Provide results using command GUID as the key and the result data as the value.
-        /// </summary>
-        public Dictionary<string, string> responses;
     }
 
     public class Program
@@ -479,7 +450,7 @@ namespace MDACS.Command
             handlers.Add("/command-wait", handler.CommandWaitHandler);
             handlers.Add("/command-execute", handler.CommandExecuteHandler);
             handlers.Add("/command-response-write", handler.CommandResponseWriteHandler);
-            handlers.Add("/command-response-take", handler.CommandResponseTakeHandler);
+            handlers.Add("/command-response-take", handler.CommandResponseReadHandler);
 
             var server = SimpleServer<ServerHandler>.Create(
                 handler,
@@ -496,13 +467,6 @@ namespace MDACS.Command
 
             a.Start();
             a.Join();
-
-            // Please do not let me forget this convulted retarded sequence to get from PEM to PFX with the private key.
-            // openssl crl2pkcs7 -nocrl -inkey privkey.pem -certfile fullchain.pem -out test.p7b
-            // openssl pkcs7 -print_certs -in test.p7b -out test.cer
-            // openssl pkcs12 -export -in test.cer -inkey privkey.pem -out test.pfx -nodes
-            // THEN... for Windows, at least, import into cert store, then export with private key and password.
-            // FINALLY... use the key now and make sure its X509Certificate2.. notice the 2 on the end? Yep.
         }
     }
 }
