@@ -346,13 +346,15 @@ namespace MDACS.Command
             var actualId = GetCompleteWaitId(req.serviceId, req.serviceGuid);
 
             if (!groups.ContainsKey(actualId)) {
-                await encoder.WriteQuickHeader(404, "No such queue exists");
-                await encoder.BodyWriteSingleChunk(JsonConvert.SerializeObject(
-                    new CommandWaitResponse() {
-                        success = false,
-                        commands = null,
-                    }
-                ));
+                //await encoder.WriteQuickHeader(404, "No such queue exists");
+                //await encoder.BodyWriteSingleChunk(JsonConvert.SerializeObject(
+                //    new CommandWaitResponse() {
+                //        success = false,
+                //        commands = null,
+                //    }
+                //));
+
+                groups[actualId] = new CommandQueueGroup();
 
                 return Task.CompletedTask;
             }
