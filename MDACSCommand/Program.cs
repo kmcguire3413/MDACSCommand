@@ -234,13 +234,15 @@ namespace MDACS.Command
             var req = JsonConvert.DeserializeObject<CommandExecuteRequest>(auth.payload);
 
             if (!groups.ContainsKey(req.serviceId)) {
-                await encoder.WriteQuickHeader(404, "Service does not exist");
-                await encoder.BodyWriteSingleChunk(JsonConvert.SerializeObject(
-                    JObject.FromObject(new {
-                        success = false,
-                    })
-                ));
-                return Task.CompletedTask;
+                //await encoder.WriteQuickHeader(404, "Service does not exist");
+                //await encoder.BodyWriteSingleChunk(JsonConvert.SerializeObject(
+                //    JObject.FromObject(new {
+                //        success = false,
+                //    })
+                //));
+                //return Task.CompletedTask;
+
+                groups[req.serviceId] = new CommandQueueGroup();
             }
 
             await groups[req.serviceId].Add(new CommandWaitResponseEntry() {
@@ -306,7 +308,7 @@ namespace MDACS.Command
             }
 
             return (bool)valueObject;
-        }        
+        }
 
         public async Task<Task> CommandWaitHandler(ServerHandler shandler, HTTPRequest request, Stream body, IProxyHTTPEncoder encoder) {
             var auth = await Helpers.ReadMessageFromStreamAndAuthenticate(config.authUrl, 1024 * 16, body);
@@ -450,7 +452,7 @@ namespace MDACS.Command
             handlers.Add("/command-wait", handler.CommandWaitHandler);
             handlers.Add("/command-execute", handler.CommandExecuteHandler);
             handlers.Add("/command-response-write", handler.CommandResponseWriteHandler);
-            handlers.Add("/command-response-take", handler.CommandResponseReadHandler);
+            handlers.Add("/command-response-read", handler.CommandResponseReadHandler);
 
             var server = SimpleServer<ServerHandler>.Create(
                 handler,
@@ -462,6 +464,7 @@ namespace MDACS.Command
 
             var a = new Thread(() =>
             {
+                Console.WriteLine("command service running");
                 server.Wait();
             });
 
